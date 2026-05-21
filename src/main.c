@@ -4,16 +4,21 @@
 #include "screen.h"
 #include "prefix.h"
 #include "catalog.h"
+#include "localprefix.h"
+#include "copy.h"
 
 /* ------------------------------------------------------------------ */
 /* Menu definition                                                      */
 /* ------------------------------------------------------------------ */
 
-#define MENU_COUNT 2
+#define MENU_COUNT 5
 
 static const char *menu_items[] = {
     "SET PREFIX",
     "CATALOG",
+    "SET LOCAL PREFIX",
+    "COPY NET -> LOCAL",
+    "COPY LOCAL -> NET",
 };
 
 /* Version string baked in at compile time by the build system */
@@ -66,8 +71,11 @@ void main(void)
             draw_menu(sel);
         } else if (c == KEY_ENTER) {
             switch (sel) {
-                case 0: set_prefix_screen(); break;
-                case 1: catalog_screen();    break;
+                case 0: set_prefix_screen();     break;
+                case 1: catalog_screen();        break;
+                case 2: local_prefix_screen();   break;
+                case 3: copy_from_net_screen();  break;
+                case 4: copy_to_net_screen();    break;
             }
             draw_menu(sel);   /* redraw after returning from sub-screen */
         } else if (c == KEY_ESC) {

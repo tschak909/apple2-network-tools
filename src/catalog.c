@@ -311,7 +311,7 @@ static void draw_prefix_item(unsigned char idx, unsigned char sel)
  * Let the user pick a prefix slot.
  * Returns 0-7 on success, 255 on ESC/cancel.
  */
-static unsigned char select_prefix(void)
+unsigned char select_prefix(void)
 {
     unsigned char sel = 0, prev, i, c;
 
