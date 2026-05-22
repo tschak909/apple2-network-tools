@@ -479,6 +479,182 @@ static unsigned char local_load_dir(const char *cpath)
 }
 
 /* ------------------------------------------------------------------ */
+/* Type/auxtype selection dialog (used by COPY NET → LOCAL)            */
+/* ------------------------------------------------------------------ */
+
+#define TOPT_COUNT  8
+#define TOPT_CUSTOM 8
+#define TOPT_TOTAL  9
+
+static const char topt_lbl[TOPT_COUNT][4] = {
+    "BIN","TXT","BAS","SYS","INT","ADB","AWP","ASP"
+};
+static const unsigned char topt_ft[TOPT_COUNT] = {
+    0x06, 0x04, 0xFC, 0xFF, 0xFA, 0x19, 0x1A, 0x1B
+};
+static const unsigned int topt_ax[TOPT_COUNT] = {
+    0x0000, 0x0000, 0x0000, 0x2000, 0x0000, 0x0000, 0x0000, 0x0000
+};
+
+/* Returns index into topt_ft[] that best matches filename extension */
+static unsigned char guess_type(const char *name)
+{
+    const char *dot = 0;
+    char ext[5];
+    unsigned char i, elen;
+
+    for (i = 0; name[i]; i++)
+        if (name[i] == '.') dot = name + i;
+    if (!dot) return 0;
+    dot++;
+
+    for (elen = 0; dot[elen] && elen < 4; elen++) {
+        ext[elen] = dot[elen];
+        if (ext[elen] >= 'a' && ext[elen] <= 'z') ext[elen] -= 0x20;
+    }
+    ext[elen] = 0;
+
+    for (i = 0; i < TOPT_COUNT; i++)
+        if (strcmp(ext, topt_lbl[i]) == 0) return i;
+    if (strcmp(ext, "TEXT") == 0 || strcmp(ext, "MD") == 0) return 1; /* TXT */
+    return 0; /* BIN */
+}
+
+static void draw_topt_row(unsigned char idx, unsigned char sel)
+{
+    gotoxy(0, (unsigned char)(7 + idx));
+    if (idx == sel) revers(1);
+    if (idx < TOPT_COUNT) {
+        cprintf(" %-3s  $%02X  AUX:$%04X                    ",
+                topt_lbl[idx], (unsigned)topt_ft[idx], (unsigned)topt_ax[idx]);
+    } else {
+        cprintf("%-40s", " CUSTOM TYPE/AUXTYPE...");
+    }
+    if (idx == sel) revers(0);
+}
+
+/*
+ * Read up to maxdig hex digits at (col, row).
+ * Returns 1 on RETURN (value in *val_out), 0 on ESC.
+ */
+static unsigned char read_hex(unsigned char col, unsigned char row,
+                               unsigned char maxdig, unsigned int *val_out)
+{
+    char buf[5];
+    unsigned char n, i;
+    unsigned int val;
+    char ch;
+    unsigned char c;
+
+    n = 0;
+    gotoxy(col, row);
+    for (i = 0; i < maxdig; i++) cputc('_');
+    gotoxy(col, row);
+
+    for (;;) {
+        c = cgetc();
+        if (c == KEY_ESC) return 0;
+        if (c == KEY_ENTER) break;
+        if ((c == KEY_LEFT || c == KEY_DEL) && n > 0) {
+            n--;
+            gotoxy((unsigned char)(col + n), row);
+            cputc('_');
+            gotoxy((unsigned char)(col + n), row);
+            continue;
+        }
+        ch = (char)c;
+        if (ch >= 'a' && ch <= 'f') ch -= 0x20;
+        if (((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F')) && n < maxdig) {
+            buf[n++] = ch;
+            cputc(ch);
+        }
+    }
+
+    val = 0;
+    for (i = 0; i < n; i++) {
+        val = (unsigned int)(val << 4);
+        ch = buf[i];
+        val |= (unsigned int)((ch >= '0' && ch <= '9') ? (ch - '0') : (ch - 'A' + 10));
+    }
+    *val_out = val;
+    return 1;
+}
+
+/*
+ * Show file-type selection dialog for one network file.
+ * Guesses the type from filename extension, lets user navigate and override.
+ * Returns 1 with ftype/auxtype filled, or 0 to skip this file.
+ */
+static unsigned char ask_file_type(const char *filename,
+                                    unsigned char *ftype_out,
+                                    unsigned int  *auxtype_out)
+{
+    unsigned char sel, prev, c, i, cft;
+    unsigned int  cax, tmp;
+    char fname_trunc[35];
+
+    sel = guess_type(filename);
+    cft = 0; cax = 0;
+
+    strncpy(fname_trunc, filename, 34);
+    fname_trunc[34] = 0;
+
+    chlinexy(0, 4, SCREEN_W);
+    gotoxy(0, 5);
+    cprintf("FILE: %-34s", fname_trunc);
+    chlinexy(0, 6, SCREEN_W);
+
+    for (i = 0; i < TOPT_TOTAL; i++)
+        draw_topt_row(i, sel);
+
+    chlinexy(0, 16, SCREEN_W);
+    gotoxy(0, 17);
+    cprintf("%-40s", "I/M:SEL  RETURN:COPY  ESC:SKIP FILE");
+    gotoxy(0, 18); cclear(SCREEN_W);
+    gotoxy(0, 19); cclear(SCREEN_W);
+
+    for (;;) {
+        c = cgetc();
+
+        if (is_up(c) && sel > 0) {
+            prev = sel--;
+            draw_topt_row(prev, sel);
+            draw_topt_row(sel,  sel);
+        } else if (is_down(c) && sel < TOPT_TOTAL - 1) {
+            prev = sel++;
+            draw_topt_row(prev, sel);
+            draw_topt_row(sel,  sel);
+        } else if (c == KEY_ENTER) {
+            if (sel < TOPT_COUNT) {
+                *ftype_out   = topt_ft[sel];
+                *auxtype_out = topt_ax[sel];
+                return 1;
+            }
+            /* CUSTOM: prompt for type then auxtype */
+            gotoxy(0, 18);
+            cprintf("%-40s", "FTYPE:$__  (ESC=BACK)");
+            if (!read_hex(7, 18, 2, &tmp)) {
+                screen_msg(18, "");
+                continue;
+            }
+            cft = (unsigned char)(tmp & 0xFF);
+            gotoxy(0, 19);
+            cprintf("%-40s", "AUXTYPE:$____  (ESC=BACK)");
+            if (!read_hex(9, 19, 4, &cax)) {
+                screen_msg(18, "");
+                screen_msg(19, "");
+                continue;
+            }
+            *ftype_out   = cft;
+            *auxtype_out = cax;
+            return 1;
+        } else if (c == KEY_ESC) {
+            return 0;
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* File copy operations                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -487,7 +663,9 @@ static unsigned char local_load_dir(const char *cpath)
  * Uses STATUS + sp_read to avoid the dirBuffer side-effect issue.
  */
 static unsigned char copy_net_to_local(const char *net_spec,
-                                        const char *local_path)
+                                        const char *local_path,
+                                        unsigned char ftype,
+                                        unsigned int  auxtype)
 {
     uint16_t bw;
     uint8_t  conn, err;
@@ -497,7 +675,8 @@ static unsigned char copy_net_to_local(const char *net_spec,
     if (network_open(net_spec, OPEN_MODE_READ, 0) != FN_ERR_OK)
         return 0;
 
-    _filetype = PRODOS_T_BIN;
+    _filetype = ftype;
+    _auxtype  = auxtype;
     fd = open(local_path, O_WRONLY | O_CREAT | O_TRUNC);
     if (fd < 0) {
         network_close(net_spec);
@@ -560,6 +739,8 @@ void copy_from_net_screen(void)
     unsigned char slot, sel = 0, top = 0, prev, c, i;
     unsigned char need_reload = 1;
     unsigned char tagged_count;
+    unsigned char ftype;
+    unsigned int  auxtype;
 
     is_local = 0;
 
@@ -647,13 +828,15 @@ void copy_from_net_screen(void)
                     strncat(dst_path, prodos_name,
                             sizeof(dst_path) - strlen(dst_path) - 1);
 
-                    screen_msg(20, prodos_name);
-
                     if (cis_dir[i]) {
+                        screen_msg(20, prodos_name);
                         make_pascal_path(dst_path, pascal_buf, sizeof(pascal_buf));
                         prodos_mkdir(pascal_buf);
                     } else {
-                        copy_net_to_local(src_spec, dst_path);
+                        if (!ask_file_type(cnames[i], &ftype, &auxtype))
+                            continue;
+                        screen_msg(20, prodos_name);
+                        copy_net_to_local(src_spec, dst_path, ftype, auxtype);
                     }
                 }
 

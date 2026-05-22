@@ -14,9 +14,9 @@
 #define MENU_COUNT 5
 
 static const char *menu_items[] = {
-    "SET PREFIX",
-    "CATALOG",
     "SET LOCAL PREFIX",
+    "SET NETWORK PREFIX",
+    "CATALOG",
     "COPY NET -> LOCAL",
     "COPY LOCAL -> NET",
 };
@@ -37,15 +37,15 @@ static void draw_menu(unsigned char sel)
     /* Redraw header each time so returning from a sub-screen is clean */
     screen_header("FUJINET NET.TOOLS " GIT_VERSION);
 
+    gotoxy(1, 3);
+    cprintf("LOCAL PREFIX: %-24s", g_local_prefix);
+
     for (i = 0; i < MENU_COUNT; i++) {
         gotoxy(6, 6 + i * 2);
         if (i == sel) revers(1);
         cprintf("%-28s", menu_items[i]);
         if (i == sel) revers(0);
     }
-
-    gotoxy(1, 16);
-    cprintf("LOCAL PREFIX: %-24s", g_local_prefix);
 
     screen_footer("I/M:SELECT  RETURN:ENTER  ESC:QUIT");
 }
@@ -74,9 +74,9 @@ void main(void)
             draw_menu(sel);
         } else if (c == KEY_ENTER) {
             switch (sel) {
-                case 0: set_prefix_screen();     break;
-                case 1: catalog_screen();        break;
-                case 2: local_prefix_screen();   break;
+                case 0: local_prefix_screen();   break;
+                case 1: set_prefix_screen();     break;
+                case 2: catalog_screen();        break;
                 case 3: copy_from_net_screen();  break;
                 case 4: copy_to_net_screen();    break;
             }
