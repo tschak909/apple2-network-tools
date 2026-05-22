@@ -35,7 +35,7 @@ static void draw_menu(unsigned char sel)
     unsigned char i;
 
     /* Redraw header each time so returning from a sub-screen is clean */
-    screen_header("NET.TOOLS " GIT_VERSION);
+    screen_header("FUJINET NET.TOOLS " GIT_VERSION);
 
     for (i = 0; i < MENU_COUNT; i++) {
         gotoxy(6, 6 + i * 2);
@@ -43,6 +43,9 @@ static void draw_menu(unsigned char sel)
         cprintf("%-28s", menu_items[i]);
         if (i == sel) revers(0);
     }
+
+    gotoxy(1, 16);
+    cprintf("LOCAL PREFIX: %-24s", g_local_prefix);
 
     screen_footer("I/M:SELECT  RETURN:ENTER  ESC:QUIT");
 }
@@ -55,8 +58,8 @@ void main(void)
 {
     unsigned char sel = 0, c;
 
-    /* Load prefixes once at startup so catalog_screen works immediately */
     prefix_load();
+    local_prefix_load();
 
     draw_menu(sel);
 

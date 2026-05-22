@@ -36,6 +36,28 @@ void __fastcall__ get_local_prefix(char *buf);
  */
 uint8_t __fastcall__ prodos_mkdir(const char *pascal_path);
 
+/*
+ * Read one 512-byte ProDOS block via READ_BLOCK ($80).
+ * Set rdb_unit (ProDOS unit_num: slot<<4 | drive<<7) and rdb_block (block #)
+ * before calling.  buf must be at least 512 bytes.
+ * Returns 0 on success, ProDOS error code on failure.
+ */
+extern unsigned char rdb_unit;
+extern unsigned int  rdb_block;
+uint8_t __fastcall__ prodos_read_block(unsigned char *buf);
+
+/*
+ * C-string form of the active local prefix (e.g. "/HARD1/").
+ * Populated by local_prefix_load() at startup; updated by local_prefix_screen().
+ */
+extern char g_local_prefix[34];
+
+/*
+ * Determine the initial local prefix at startup.
+ * Tries ProDOS GET_PREFIX first, then falls back to the first online volume.
+ */
+void local_prefix_load(void);
+
 /* Screen: list online ProDOS volumes and let user set the system prefix. */
 void local_prefix_screen(void);
 

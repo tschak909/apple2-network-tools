@@ -14,12 +14,16 @@
         .export         _get_local_prefix
         .export         _prodos_mkdir
         .export         _online_buf
+        .export         _rdb_unit
+        .export         _rdb_block
+        .export         _prodos_read_block
 
 PRODOS_MLI      = $BF00
 MLI_ON_LINE     = $C5
 MLI_SET_PREFIX  = $C6
 MLI_GET_PREFIX  = $C7
 MLI_CREATE      = $C0
+MLI_READ_BLOCK  = $80
 
 ; ----------------------------------------------------------------
         .segment        "BSS"
@@ -44,6 +48,16 @@ setpfx_params:
 getpfx_params:
         .byte   1                       ; param_count
         .word   0                       ; buffer ptr (set by get_local_prefix)
+
+; READ_BLOCK parameters (unit and block filled at runtime by C code)
+_rdb_unit:      .byte   0               ; exported for C: rdb_unit = unit_num
+_rdb_block:     .word   0               ; exported for C: rdb_block = block number
+
+rdb_params:
+        .byte   3                       ; param_count
+        .byte   0                       ; unit_num (filled at runtime)
+        .word   0                       ; data_buffer (filled at runtime)
+        .word   0                       ; block_num (filled at runtime)
 
 ; CREATE parameter block for directory (pathname pointer filled at runtime)
 create_params:
@@ -152,6 +166,38 @@ err:
         jsr     PRODOS_MLI
         .byte   MLI_CREATE
         .word   create_params
+        bcc     ok
+        ldx     #0                      ; A already has error code
+        rts
+ok:
+        lda     #0
+        ldx     #0
+        rts
+
+.endproc
+
+
+; ---------------------------------------------------------------
+; uint8_t __fastcall__ prodos_read_block(unsigned char *buf)
+;
+; Reads one 512-byte ProDOS block into buf.
+; Caller must set rdb_unit and rdb_block before calling.
+; Returns 0 on success, ProDOS error code on failure.
+; On entry (cc65 fastcall): A = low byte, X = high byte of buf.
+; ---------------------------------------------------------------
+.proc   _prodos_read_block
+
+        sta     rdb_params+2            ; data_buffer low byte
+        stx     rdb_params+3            ; data_buffer high byte
+        lda     _rdb_unit
+        sta     rdb_params+1            ; unit_num
+        lda     _rdb_block
+        sta     rdb_params+4            ; block_num low
+        lda     _rdb_block+1
+        sta     rdb_params+5            ; block_num high
+        jsr     PRODOS_MLI
+        .byte   MLI_READ_BLOCK
+        .word   rdb_params
         bcc     ok
         ldx     #0                      ; A already has error code
         rts

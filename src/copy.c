@@ -17,7 +17,7 @@ int8_t sp_read(unsigned char dest, unsigned int len);
 #include "screen.h"
 #include "localprefix.h"
 
-#define MAX_COPY_ENTRIES  64
+#define MAX_COPY_ENTRIES  48
 #define COPY_NAME_LEN     24   /* max stored filename length including NUL */
 #define VIS_ROWS          16
 
@@ -28,7 +28,11 @@ int8_t sp_read(unsigned char dest, unsigned int len);
 static char          cnames[MAX_COPY_ENTRIES][COPY_NAME_LEN];
 static unsigned char cis_dir[MAX_COPY_ENTRIES];
 static unsigned char ctag[MAX_COPY_ENTRIES];
+static unsigned char ctype[MAX_COPY_ENTRIES];
+static unsigned      cblocks[MAX_COPY_ENTRIES];
+static struct datetime cmtime[MAX_COPY_ENTRIES];
 static unsigned char centry_count;
+static unsigned char is_local;
 
 /* I/O scratch buffer used for file copy chunks */
 static unsigned char copy_buf[SP_PAYLOAD_SIZE];
@@ -140,6 +144,138 @@ static void make_pascal_path(const char *cpath, char *out, unsigned char outlen)
 }
 
 /* ------------------------------------------------------------------ */
+/* Local file metadata display helpers                                  */
+/* ------------------------------------------------------------------ */
+
+static const char mon_abbr[13][4] = {
+    "???",
+    "JAN","FEB","MAR","APR","MAY","JUN",
+    "JUL","AUG","SEP","OCT","NOV","DEC"
+};
+
+static const char *ftype_str(unsigned char t)
+{
+    static char buf[4];
+    switch (t) {
+        case 0x00: return "---";
+        case 0x04: return "TXT";
+        case 0x06: return "BIN";
+        case 0x0F: return "DIR";
+        case 0x19: return "ADB";
+        case 0x1A: return "AWP";
+        case 0x1B: return "ASP";
+        case 0xB3: return "S16";
+        case 0xFA: return "INT";
+        case 0xFB: return "IVR";
+        case 0xFC: return "BAS";
+        case 0xFD: return "VAR";
+        case 0xFE: return "REL";
+        case 0xFF: return "SYS";
+    }
+    buf[0] = "0123456789ABCDEF"[(t >> 4) & 0xF];
+    buf[1] = "0123456789ABCDEF"[t & 0xF];
+    buf[2] = 'H';
+    buf[3] = 0;
+    return buf;
+}
+
+/* Writes exactly 9 chars + NUL into out[10]: "DD-MON-YY" or " NO DATE " */
+static void fmt_date(const struct datetime *dt, char *out)
+{
+    unsigned char day = dt->date.day;
+    unsigned char mon = dt->date.mon;
+    unsigned char yr  = (unsigned char)(dt->date.year % 100);
+    const char   *m;
+
+    if (day == 0 && mon == 0) {
+        memcpy(out, " NO DATE ", 9);
+        out[9] = 0;
+        return;
+    }
+    if (mon == 0 || mon > 12) mon = 0;
+    m       = mon_abbr[mon];
+    out[0]  = (char)('0' + day / 10);
+    out[1]  = (char)('0' + day % 10);
+    out[2]  = '-';
+    out[3]  = m[0]; out[4] = m[1]; out[5] = m[2];
+    out[6]  = '-';
+    out[7]  = (char)('0' + yr / 10);
+    out[8]  = (char)('0' + yr % 10);
+    out[9]  = 0;
+}
+
+/* Derive ProDOS unit_num (slot<<4 | drive<<7) from g_local_prefix volume name */
+static unsigned char get_unit_from_prefix(void)
+{
+    unsigned char i, b, nlen, vnlen = 0;
+    char volname[16];
+    const char *p = g_local_prefix;
+
+    if (*p == '/') p++;
+    while (*p && *p != '/' && vnlen < 15)
+        volname[vnlen++] = *p++;
+    if (vnlen == 0) return 0;
+
+    for (i = 0; i < 16; i++) {
+        b = online_buf[i * 16];
+        if (b == 0) break;
+        nlen = b & 0x0F;
+        if (nlen == 0) continue;
+        if (nlen == vnlen &&
+            memcmp(online_buf + i * 16 + 1, volname, vnlen) == 0)
+            return (unsigned char)(b & 0xF0);
+    }
+    return 0;
+}
+
+/*
+ * Display volume space at row 3.
+ * Reads the volume directory header (block 2) and scans bitmap blocks.
+ * Reuses copy_buf[512] for block reads — must not be called during a copy.
+ */
+static void show_volume_space(void)
+{
+    unsigned char unit;
+    unsigned int  total, bitmap_ptr, i, j, bmap_blocks;
+    unsigned long free_count = 0;
+    unsigned int  free_blocks;
+    unsigned char b;
+
+    unit = get_unit_from_prefix();
+    if (unit == 0) return;
+
+    rdb_unit  = unit;
+    rdb_block = 2;
+    if (prodos_read_block(copy_buf) != 0) return;
+
+    /* Volume directory header starts at block byte 4 */
+    bitmap_ptr = (unsigned int)copy_buf[0x21] |
+                 ((unsigned int)copy_buf[0x22] << 8);
+    total      = (unsigned int)copy_buf[0x23] |
+                 ((unsigned int)copy_buf[0x24] << 8);
+
+    if (total == 0 || bitmap_ptr == 0) return;
+
+    bmap_blocks = (total + 4095U) / 4096U;
+
+    for (i = 0; i < bmap_blocks; i++) {
+        rdb_unit  = unit;
+        rdb_block = (unsigned int)(bitmap_ptr + i);
+        if (prodos_read_block(copy_buf) != 0) break;
+        for (j = 0; j < 512; j++) {
+            b = copy_buf[j];
+            while (b) { free_count++; b = (unsigned char)(b & (unsigned char)(b - 1)); }
+        }
+    }
+
+    free_blocks = (free_count > (unsigned long)total) ?
+                  total : (unsigned int)free_count;
+
+    gotoxy(0, 3);
+    cprintf("USED:%-5u FREE:%-5u", total - free_blocks, free_blocks);
+}
+
+/* ------------------------------------------------------------------ */
 /* Display                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -147,8 +283,9 @@ static void draw_copy_row(unsigned char i, unsigned char top, unsigned char sel)
 {
     unsigned char is_sel = (i == sel);
     unsigned char nlen   = (unsigned char)strlen(cnames[i]);
-    unsigned char j;
+    unsigned char j, maxname;
     char          ch;
+    char          date_str[10];
 
     gotoxy(0, (unsigned char)(4 + i - top));
 
@@ -157,18 +294,43 @@ static void draw_copy_row(unsigned char i, unsigned char top, unsigned char sel)
     /* col 0: tag marker */
     cputc(ctag[i] ? '*' : ' ');
 
-    /* cols 1-37: filename (37 chars) */
-    for (j = 0; j < 37; j++) {
-        ch = (j < nlen) ? cnames[i][j] : ' ';
-        if (is_sel && ch >= 'a' && ch <= 'z') ch -= 0x20;
-        cputc(ch);
+    if (is_local) {
+        /* cols 1-15: filename (15 chars, ProDOS max) */
+        maxname = 15;
+        for (j = 0; j < maxname; j++) {
+            ch = (j < nlen) ? cnames[i][j] : ' ';
+            if (is_sel && ch >= 'a' && ch <= 'z') ch -= 0x20;
+            cputc(ch);
+        }
+        /* col 16: dir indicator */
+        cputc(cis_dir[i] ? '/' : ' ');
+        /* col 17: space */
+        cputc(' ');
+        /* cols 18-20: file type */
+        cputs(ftype_str(ctype[i]));
+        /* col 21: space */
+        cputc(' ');
+        /* cols 22-26: blocks (5 chars right-justified) */
+        cprintf("%5u", cblocks[i]);
+        /* col 27: space */
+        cputc(' ');
+        /* cols 28-36: date (9 chars) */
+        fmt_date(&cmtime[i], date_str);
+        cputs(date_str);
+        /* cols 37-39: padding */
+        cputs("   ");
+    } else {
+        /* cols 1-37: filename (37 chars) */
+        for (j = 0; j < 37; j++) {
+            ch = (j < nlen) ? cnames[i][j] : ' ';
+            if (is_sel && ch >= 'a' && ch <= 'z') ch -= 0x20;
+            cputc(ch);
+        }
+        /* col 38: dir indicator */
+        cputc(cis_dir[i] ? '/' : ' ');
+        /* col 39: padding */
+        cputc(' ');
     }
-
-    /* col 38: dir indicator */
-    cputc(cis_dir[i] ? '/' : ' ');
-
-    /* col 39: padding */
-    cputc(' ');
 
     if (is_sel) revers(0);
 }
@@ -281,6 +443,8 @@ static unsigned char net_load_dir(const char *spec)
 /* Local directory loading                                              */
 /* ------------------------------------------------------------------ */
 
+extern unsigned char __oserror;
+
 static unsigned char local_load_dir(const char *cpath)
 {
     DIR           *d;
@@ -290,15 +454,23 @@ static unsigned char local_load_dir(const char *cpath)
 
     d = opendir(cpath);
     if (!d) {
-        screen_msg(20, "OPENDIR FAILED");
+        static char emsg[8];
+        emsg[0] = 'E'; emsg[1] = ':'; emsg[2] = '$';
+        emsg[3] = "0123456789ABCDEF"[(__oserror >> 4) & 0xF];
+        emsg[4] = "0123456789ABCDEF"[__oserror & 0xF];
+        emsg[5] = 0;
+        screen_msg(20, emsg);
         return 0;
     }
 
     while ((de = readdir(d)) != NULL && centry_count < MAX_COPY_ENTRIES) {
         strncpy(cnames[centry_count], de->d_name, COPY_NAME_LEN - 1);
         cnames[centry_count][COPY_NAME_LEN - 1] = 0;
-        cis_dir[centry_count] = _DE_ISDIR(de->d_type) ? 1 : 0;
-        ctag[centry_count]    = 0;
+        cis_dir[centry_count]  = _DE_ISDIR(de->d_type) ? 1 : 0;
+        ctag[centry_count]     = 0;
+        ctype[centry_count]    = de->d_type;
+        cblocks[centry_count]  = de->d_blocks;
+        cmtime[centry_count]   = de->d_mtime;
         centry_count++;
     }
 
@@ -388,6 +560,8 @@ void copy_from_net_screen(void)
     unsigned char slot, sel = 0, top = 0, prev, c, i;
     unsigned char need_reload = 1;
     unsigned char tagged_count;
+
+    is_local = 0;
 
     slot = select_prefix();
     if (slot == 255) return;
@@ -504,47 +678,48 @@ void copy_from_net_screen(void)
 
 void copy_to_net_screen(void)
 {
-    static char local_subpath[64];  /* relative to local_root */
-    static char local_root[34];     /* C path of local prefix, e.g. /HARD1/ */
-    static char local_cur[64];      /* local_root + local_subpath */
-    static char net_dest_base[96];  /* network dest dir spec (ends with '*') */
-    static char dst_spec[96];       /* per-file network destination spec */
-    static char src_path[64];       /* per-file local source path */
+    static char local_subpath[64];
+    static char local_root[34];
+    static char local_cur[64];
+    static char net_dest_base[96];
+    static char dst_spec[96];
+    static char src_path[64];
     static char title[SCREEN_W + 1];
 
     unsigned char slot, sel = 0, top = 0, prev, c, i;
     unsigned char need_reload = 1;
     unsigned char tagged_count;
 
-    slot = select_prefix();
-    if (slot == 255) return;
+    is_local = 1;
 
-    get_local_cpath(local_root, sizeof(local_root));
-
-    /* Build fixed network destination at root of selected slot. */
-    build_net_spec(slot, "", net_dest_base, sizeof(net_dest_base));
-
+    /* Use the local prefix set at startup / via SET LOCAL PREFIX */
+    strncpy(local_root, g_local_prefix, sizeof(local_root) - 1);
+    local_root[sizeof(local_root) - 1] = 0;
     local_subpath[0] = 0;
+
+    /* Populate online_buf so get_unit_from_prefix() can find the volume */
+    get_online_volumes();
 
     for (;;) {
         if (need_reload) {
             need_reload = 0;
             sel = 0; top = 0;
 
-            /* Build current local path: local_root + local_subpath */
             strncpy(local_cur, local_root, sizeof(local_cur) - 1);
             local_cur[sizeof(local_cur) - 1] = 0;
             strncat(local_cur, local_subpath,
                     sizeof(local_cur) - strlen(local_cur) - 1);
 
-            strncpy(title, local_cur, SCREEN_W - 1);
-            title[SCREEN_W - 1] = 0;
+            strncpy(title, "COPY FROM: ", sizeof(title) - 1);
+            strncat(title, local_cur,
+                    sizeof(title) - (unsigned char)strlen(title) - 1);
             screen_header(title);
             screen_footer("SPC:TAG  *:ALL  RET:CD/COPY  ESC:BACK");
 
             if (!local_load_dir(local_cur)) {
                 screen_msg(21, "PRESS ANY KEY");
                 cgetc();
+                screen_msg(20, "");
                 screen_msg(21, "");
                 if (local_subpath[0] == 0) return;
                 trim_last_dir(local_subpath);
@@ -553,6 +728,7 @@ void copy_to_net_screen(void)
             }
 
             draw_copy_listing(top, sel);
+            show_volume_space();
         }
 
         c = cgetc();
@@ -583,42 +759,55 @@ void copy_to_net_screen(void)
             }
         } else if (c == KEY_ENTER) {
             if (cis_dir[sel]) {
-                /* navigate into local subdirectory */
                 strncat(local_subpath, cnames[sel],
                         sizeof(local_subpath) - strlen(local_subpath) - 2);
                 strncat(local_subpath, "/",
                         sizeof(local_subpath) - strlen(local_subpath) - 1);
                 need_reload = 1;
             } else {
-                /* copy: all tagged, or just current if none tagged */
+                /* Tag current if nothing tagged */
                 tagged_count = 0;
                 for (i = 0; i < centry_count; i++)
                     if (ctag[i]) tagged_count++;
                 if (tagged_count == 0) ctag[sel] = 1;
 
-                for (i = 0; i < centry_count; i++) {
-                    if (!ctag[i]) continue;
-                    if (cis_dir[i]) continue;   /* skip directories */
+                /* Ask for network destination */
+                slot = select_prefix();
+                if (slot == 255) {
+                    /* Cancelled — restore header/footer */
+                    screen_header(title);
+                    screen_footer("SPC:TAG  *:ALL  RET:CD/COPY  ESC:BACK");
+                    draw_copy_listing(top, sel);
+                    show_volume_space();
+                } else {
+                    build_net_spec(slot, "", net_dest_base,
+                                   sizeof(net_dest_base));
 
-                    /* local source: local_cur + cnames[i] */
-                    strncpy(src_path, local_cur, sizeof(src_path) - 1);
-                    src_path[sizeof(src_path) - 1] = 0;
-                    strncat(src_path, cnames[i],
-                            sizeof(src_path) - strlen(src_path) - 1);
+                    for (i = 0; i < centry_count; i++) {
+                        if (!ctag[i]) continue;
+                        if (cis_dir[i]) continue;
 
-                    /* network dest: base (strip '*') + cnames[i] */
-                    build_file_spec(net_dest_base, cnames[i],
-                                    dst_spec, sizeof(dst_spec));
+                        strncpy(src_path, local_cur, sizeof(src_path) - 1);
+                        src_path[sizeof(src_path) - 1] = 0;
+                        strncat(src_path, cnames[i],
+                                sizeof(src_path) - strlen(src_path) - 1);
 
-                    screen_msg(20, cnames[i]);
-                    copy_local_to_net(src_path, dst_spec);
+                        build_file_spec(net_dest_base, cnames[i],
+                                        dst_spec, sizeof(dst_spec));
+
+                        screen_msg(20, cnames[i]);
+                        copy_local_to_net(src_path, dst_spec);
+                    }
+
+                    screen_msg(20, "DONE - PRESS ANY KEY");
+                    cgetc();
+                    screen_header(title);
+                    screen_footer("SPC:TAG  *:ALL  RET:CD/COPY  ESC:BACK");
+                    screen_msg(20, "");
+                    for (i = 0; i < centry_count; i++) ctag[i] = 0;
+                    draw_copy_listing(top, sel);
+                    show_volume_space();
                 }
-
-                screen_msg(20, "DONE - PRESS ANY KEY");
-                cgetc();
-                screen_msg(20, "");
-                for (i = 0; i < centry_count; i++) ctag[i] = 0;
-                draw_copy_listing(top, sel);
             }
         } else if (c == KEY_ESC) {
             if (local_subpath[0] == 0) return;

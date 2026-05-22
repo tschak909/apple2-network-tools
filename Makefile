@@ -38,6 +38,8 @@ PLATFORM_COMBOS = \
   msxdos+=msx \
   adam_cpm+=adam
 
+LDFLAGS_EXTRA_APPLE2 = -C src/apple2-system.cfg
+
 include mekkogx/toplevel-rules.mk
 
 # If you need to add extra platform-specific steps, do it below:

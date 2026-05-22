@@ -24,7 +24,7 @@ $(BUILD_DISK): $(BUILD_EXEC) $(PRODOS8_DISK) $(DISK_EXTRA_DEPS) $(DISK_EXTRA_FIL
 	$(DISK_TOOL_X) export --as -d $@ BASIC.SYSTEM > $(CACHE_PLATFORM)/BASIC.SYSTEM
 	$(DISK_TOOL) -d $@ BASIC.SYSTEM
 	$(call copy-to-disk,-as,$<,$(PRODUCT_BASE),$@)
-#	$(call copy-to-disk,-p,$(CC65_UTILS_DIR)/$(LOADER_SYSTEM),$(PRODUCT_BASE).SYSTEM SYS 0x2000,$@)
+	$(call copy-to-disk,-p,$(CC65_UTILS_DIR)/$(LOADER_SYSTEM),$(PRODUCT_BASE).SYSTEM SYS 0x2000,$@)
 	$(call copy-to-disk,-as,$(CACHE_PLATFORM)/BASIC.SYSTEM,BASIC.SYSTEM,$@)
 	$(foreach f,$(DISK_EXTRA_FILES),$(call copy-to-disk,-ptx,$(f),$(notdir $(f)),$@);)
 	make -f $(PLATFORM_MK) $(PLATFORM)/disk-post
